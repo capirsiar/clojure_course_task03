@@ -1,5 +1,6 @@
 (ns clojure-course-task03.core
-  (:require [clojure.set]))
+  (:require [clojure.set])
+  (:require [clojure.string :as s]))
 
 (defn join* [table-name conds]
   (let [op (first conds)
@@ -7,14 +8,19 @@
         f2 (name (nth conds 2))]
     (str table-name " ON " f1 " " op " " f2)))
 
+;(defn where* [data]
+;  (let [ks (keys data)
+;        res (reduce str (doall (map #(let [src (get data %)
+;                                           v (if (string? src)
+;                                               (str "'" src "'")
+;                                               src)]
+;                                       (str (name %) " = " v ",")) 
+;                                    ks)))]
+;    (reduce str (butlast res))))
+
 (defn where* [data]
-  (let [ks (keys data)
-        res (reduce str (doall (map #(let [src (get data %)
-                                           v (if (string? src)
-                                               (str "'" src "'")
-                                               src)]
-                                       (str (name %) " = " v ",")) ks)))]
-    (reduce str (butlast res))))
+  (s/join "," (for [[k v] data]
+              (str (name k) " = " (if (string? v) (str "'" v "'") v)))))
 
 (defn order* [column ord]
   (str (name column)
@@ -24,8 +30,11 @@
 
 (defn offset* [v] v)
 
+;(defn -fields** [data]
+;  (reduce str (butlast (reduce str (doall (map #(str (name %) ",") data))))))
+
 (defn -fields** [data]
-  (reduce str (butlast (reduce str (doall (map #(str (name %) ",") data))))))
+  (s/join "," (map name data)))
 
 (defn fields* [flds allowed]
   (let [v1 (apply hash-set flds)
@@ -202,7 +211,7 @@
   )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; TBD: Implement the following macros
+;; DSL
 ;;
 
 (defmacro group [name & body]
@@ -216,7 +225,26 @@
   ;; 3) Создает следующие функции
   ;;    (select-agent-proposal) ;; select person, phone, address, price from proposal;
   ;;    (select-agent-agents)  ;; select clients_id, proposal_id, agent from agents;
-  )
+  (let [prefix (str "select-" (s/lower-case name) "-")
+        tbls (take-nth 3 body)
+        flds-coll* (take-nth 3 (drop 2 body))
+        flds-coll (map #(vec (map keyword %)) flds-coll*)]
+    (concat `(do (def ~(symbol (str name "-data")) '~[tbls flds-coll]))
+            (map (fn [tbl flds] 
+                   `(defn ~(symbol (str prefix tbl)) []
+                      (let [~(symbol (str tbl "-fields-var")) ~flds]
+                        (select ~tbl (~(symbol "fields") :all)))))
+                 tbls flds-coll))))
+
+(defn concat-fields [& fields]
+  (let [data (apply concat fields)]
+    (if (some #{:all} data) [:all] (vec (set data)))))
+
+(defn join-groups-data [grs-data]
+  (apply merge-with concat-fields
+         (map (fn [gr-data] 
+                (apply merge (apply map #(assoc {} %1 %2) gr-data)))
+              grs-data)))
 
 (defmacro user [name & body]
   ;; Пример
@@ -224,7 +252,17 @@
   ;;     (belongs-to Agent))
   ;; Создает переменные Ivanov-proposal-fields-var = [:person, :phone, :address, :price]
   ;; и Ivanov-agents-fields-var = [:clients_id, :proposal_id, :agent]
-  )
+  (let [body (first body)]
+    (let [grs (rest body)
+          grs-data (map #(eval (symbol (str % "-data"))) grs)
+          gr-data (join-groups-data grs-data)
+          tbls (map first gr-data)
+          flds-coll (map second gr-data)]
+      (concat `(do (def ~(symbol (str name "-tables-vars")) '~tbls)) 
+              (map (fn [tbl flds]
+                     `(def ~(symbol (str name "-" tbl "-fields-var"))
+                        ~flds))
+                   tbls flds-coll)))))
 
 (defmacro with-user [name & body]
   ;; Пример
@@ -236,4 +274,9 @@
   ;;    proposal-fields-var и agents-fields-var.
   ;;    Таким образом, функция select, вызванная внутри with-user, получает
   ;;    доступ ко всем необходимым переменным вида <table-name>-fields-var.
-  )
+  (let [tbls (eval (symbol (str name "-tables-vars")))]
+    `(let [~@(mapcat (fn [tbl]
+                       (list (symbol (str tbl "-fields-var"))
+                             (eval (symbol (str name "-" tbl "-fields-var")))))
+                     tbls)]
+       ~@body)))
